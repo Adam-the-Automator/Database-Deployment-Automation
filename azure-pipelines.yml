@@ -1,0 +1,234 @@
+##########################################################################
+# Name plus CI trigger on all files that get added in opsscripts folder  #
+##########################################################################
+
+name: $(majorVersion).$(minorVersion).$(patch)
+
+##########################################################################
+#       Variables                                                        #
+##########################################################################
+
+variables:
+  rgName: "rg-dbaautomation"          #   The Resource Group name     #  
+  rgLocation: "westeurope"            #   The region location         #
+  ip: ""                              #   The public IP address       # 
+  azSqlDatabaseName: "Estate"         #   The Azure SQL database name #
+  azSQLServerName: "sqlestate"        #   The Azure SQL server name   #
+  adminSqlLogin: "SqlAdministrator"   #   The Azure SQL login         #
+  majorVersion: 1     
+  minorVersion: 0
+  patch: $[counter(format('{0}.{1}', variables['MajorVersion'], variables['MinorVersion']), 0)]
+  buildNumber: $(MajorVersion).$(MinorVersion).$(Patch)
+  artifactName: "DBOPackage"          #   The artifact name           #
+
+##########################################################################
+#                                                                        #
+#               Deploy Azure SQL in Azure                                #
+#                                                                        #
+##########################################################################
+
+stages:
+  - stage: "CreateDB"
+    displayName: "Create database"
+    jobs:
+
+      ##########################################################################
+      #       Job: Create Azure SQL                                            #
+      ##########################################################################
+
+      - job: "Database"
+        displayName: "Create database"
+        pool: 
+          vmImage: 'windows-latest'
+
+        steps:
+          - task: AzurePowerShell@5
+            name: "Database"
+            displayName: "Create Azure SQL database"
+            inputs:
+              azureSubscription: "ServiceConnection"
+              ScriptType: "InlineScript"
+              Inline: |
+                $rg = Get-AzResourceGroup -Name $(rgName) -ErrorAction SilentlyContinue
+                if (-not $rg) {
+                    New-AzResourceGroup -Name $(rgName) -Location "$(rgLocation)"
+                }
+                                                
+                $azSQLServerName = "$(azSQLServerName)"
+                $azSqlServer = Get-AzSqlServer -ServerName $azSQLServerName 
+                if (-not $azSqlServer) {
+                    $azSqlServer = New-AzSqlServer -ResourceGroupName $(rgName) `
+                    -ServerName $azSQLServerName `
+                    -Location "$(rgLocation)" `
+                    -SqlAdministratorCredentials $(New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $(adminSqlLogin), $(ConvertTo-SecureString -String $(adminSqlpassword) -AsPlainText -Force))
+                }
+                
+                $azSqlFirwallRule = Get-AzSqlServerFirewallRule -FirewallRuleName 'FirewallRule_AccessRule' -ServerName $azSqlServerName -ResourceGroupName $(rgName) -ErrorAction SilentlyContinue
+                if (-not $azSqlFirwallRule) {
+                    # Create a server firewall rule that allows access from the specified IP range
+                    $serverFirewallRule = New-AzSqlServerFirewallRule -ResourceGroupName $(rgName) `
+                    -ServerName $azSQLServerName `
+                    -FirewallRuleName "FirewallRule_AccessRule" -StartIpAddress $(ip) -EndIpAddress $(ip)
+                }
+                                
+                $azSqlDatabase = Get-AzSqlDatabase -DatabaseName $(azSqlDatabaseName) -ServerName $azSQLServerName -ResourceGroupName $(rgName) -ErrorAction  SilentlyContinue
+                if (-not $azSqlDatabase) {
+                    $database = New-AzSqlDatabase  -ResourceGroupName $(rgName) `
+                    -ServerName $azSQLServerName `
+                    -DatabaseName $(azSqlDatabaseName) `
+                    -Edition "Basic"    
+                }
+              azurePowerShellVersion: "LatestVersion"
+##########################################################################
+#                                                                        #
+#               Create package and Publish artifact                      #
+#                                                                        #
+##########################################################################
+  - stage: "Build"
+    displayName: "Build package"
+    dependsOn: "CreateDB"
+      
+    jobs:
+
+      ##########################################################################
+      #       Job: Create package and artifact                                 #
+      ##########################################################################
+      
+      - job:
+        displayName: "Build database package"
+        pool: 
+          vmImage: 'windows-latest'
+          
+        steps:
+          - task: PowerShell@2
+            displayName: "Create database package"
+            inputs:
+              targetType: "inline"
+              script: |
+                # Get the connection string
+                $connectionString = "$(azSQLServerName)" + ".database.windows.net"
+
+                # Install module 
+                Install-Module dbops -Force -Scope CurrentUser
+
+                # Create the package
+                $build = Invoke-DBOPackageCI -Path $(System.DefaultWorkingDirectory)\sql\$(artifactName).zip -ScriptPath .\sql -Version 1.0
+
+                # Update the build number from DBOPackage
+                Write-Host "##vso[build.updatebuildnumber]$($build.Version)"
+
+                # Update the config
+                Update-DBOConfig $(System.DefaultWorkingDirectory)\sql\$(artifactName).zip -Configuration @{ SqlInstance = "$connectionString"; Database = "$(azSqlDatabaseName)"; }
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(System.DefaultWorkingDirectory)\sql\$(artifactName).zip'
+              artifact: $(artifactName)
+              publishLocation: "pipeline"
+##########################################################################
+#                                                                        #
+#               Deploy and test database package                         #
+#                                                                        #
+##########################################################################
+
+  - stage: "Release"
+      displayName: "Deploy database"
+      dependsOn: "Build"
+      jobs:
+
+        ##########################################################################
+        #       Job: Deploy package                                              #
+        ##########################################################################
+
+        - job:
+          displayName: "Deploy database"
+          pool: 
+            vmImage: 'windows-latest'
+
+          steps:
+            - task: DownloadPipelineArtifact@2
+              displayName: "Download artifact"
+              inputs:
+                buildType: "current"
+                artifactName: $(artifactName)
+                targetPath: '$(Pipeline.Workspace)\sql'
+            - task: AzurePowerShell@5
+              displayName: "Deploy database package"
+              inputs:
+                azureSubscription: "ServiceConnection"
+                ScriptType: "InlineScript"
+                Inline: |
+                  # Install the module
+                  Install-Module dbops -Force -Scope CurrentUser
+
+                  # Get current hosted agent ip
+                  $ip = Invoke-RestMethod http://ipinfo.io/json | Select-Object -ExpandProperty ip
+
+                  # Temporary add ip
+                  $azSqlFirwallRule = Get-AzSqlServerFirewallRule -FirewallRuleName 'TemporaryRule_AzureDevOps' -ServerName $(azSQLServerName) -ResourceGroupName $(rgName) -ErrorAction SilentlyContinue
+                  if ($azSqlFirwallRule) {
+                    Remove-AzSqlServerFirewallRule -ServerName $(azSQLServerName) -FirewallRuleName 'TemporaryRule_AzureDevOps' -ResourceGroupName $(rgName)
+                  }
+                  New-AzSqlServerFirewallRule -ResourceGroupName $(rgName) `
+                      -ServerName $(azSQLServerName) `
+                      -FirewallRuleName "TemporaryRule_AzureDevOps" -StartIpAddress $ip -EndIpAddress $ip
+
+                  Install-DBOPackage -Path $(Pipeline.Workspace)\sql\$(artifactName).zip -Credential $(New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $(adminSqlLogin), $(ConvertTo-SecureString -String $(adminSqlpassword) -AsPlainText -Force))
+
+                  # Always remove firewall rule
+                  Remove-AzSqlServerFirewallRule -ServerName $(azSQLServerName) -FirewallRuleName 'TemporaryRule_AzureDevOps' -ResourceGroupName $(rgName) -Force
+
+                azurePowerShellVersion: "LatestVersion"
+##########################################################################
+#                                                                        #
+#               Test database package                                    #
+#                                                                        #
+##########################################################################
+  - stage: "Test"
+    displayName: "Run test(s)"
+    dependsOn: "Release"
+
+    jobs:
+
+      ##########################################################################
+      #       Job: Test  package                                               #
+      ##########################################################################
+
+      - job:
+        displayName: "Run test(s)"
+        pool: 
+          vmImage: 'windows-latest'    
+
+        steps:
+          - task: PowerShell@2
+            inputs:
+              targetType: "inline"
+              script: |
+                # Install required module
+                Install-Module -Name dbatools -Scope CurrentUser -Repository PSGallery
+                
+                # Initiate variables
+                $instance = "$(azSqlServerName)" + ".database.windows.net"
+                $database = "$(azSqlDatabaseName)"
+                $userName = "$(adminSqlLogin)"
+                $password = "$(adminSqlPassword)"
+
+                # Specify the data for container
+                $Data = @{
+                    instance = $instance
+                    database = $database
+                    userName = $userName
+                    password = $password
+                    procedureName = 'AddInventoryRecords'
+                }
+                
+                # Create container
+                $container = New-PesterContainer -Path .\tests\ -Data $data
+
+                # Invoke with CI
+                Invoke-Pester -Container $Container -CI
+          - task: PublishTestResults@2
+            inputs:
+              testResultsFormat: 'NUnit'
+              testResultsFiles: '**/testResults.xml'
+              failTaskOnFailedTests: true
+              testRunTitle: 'Tests'

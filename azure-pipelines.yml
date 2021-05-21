@@ -131,9 +131,9 @@ stages:
 ##########################################################################
 
   - stage: "Release"
-      displayName: "Deploy database"
-      dependsOn: "Build"
-      jobs:
+    displayName: "Deploy database"
+    dependsOn: "Build"
+    jobs:
 
         ##########################################################################
         #       Job: Deploy package                                              #

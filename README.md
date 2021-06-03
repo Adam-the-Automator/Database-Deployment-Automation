@@ -1,8 +1,6 @@
-# dbaautomation
+# Database-Deployment-Automation
 
-Folder containing dbaautomation folder setup structure.
+Folder containing Database-Deployment-Automation folder setup structure for the adamtheautomator.com blog post https://adamtheautomator.com/database-deployment-automation.
 
-* cicd: Folder containing the Azure Pipelines YML file
 * sqlscripts: Contains all .sql files that can be executed through dbops module
 * psscripts: Contains script for creating Azure SQL database
-

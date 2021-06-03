@@ -112,16 +112,16 @@ stages:
                 Install-Module dbops -Force -Scope CurrentUser
 
                 # Create the package
-                $build = Invoke-DBOPackageCI -Path $(System.DefaultWorkingDirectory)\sql\$(artifactName).zip -ScriptPath .\sql -Version 1.0
+                $build = Invoke-DBOPackageCI -Path $(System.DefaultWorkingDirectory)\sqlscripts\$(artifactName).zip -ScriptPath .\sqlscripts -Version 1.0
 
                 # Update the build number from DBOPackage
                 Write-Host "##vso[build.updatebuildnumber]$($build.Version)"
 
                 # Update the config
-                Update-DBOConfig $(System.DefaultWorkingDirectory)\sql\$(artifactName).zip -Configuration @{ SqlInstance = "$connectionString"; Database = "$(azSqlDatabaseName)"; }
+                Update-DBOConfig $(System.DefaultWorkingDirectory)\sqlscripts\$(artifactName).zip -Configuration @{ SqlInstance = "$connectionString"; Database = "$(azSqlDatabaseName)"; }
           - task: PublishPipelineArtifact@1
             inputs:
-              targetPath: '$(System.DefaultWorkingDirectory)\sql\$(artifactName).zip'
+              targetPath: '$(System.DefaultWorkingDirectory)\sqlscripts\$(artifactName).zip'
               artifact: $(artifactName)
               publishLocation: "pipeline"
 ##########################################################################
@@ -150,7 +150,7 @@ stages:
               inputs:
                 buildType: "current"
                 artifactName: $(artifactName)
-                targetPath: '$(Pipeline.Workspace)\sql'
+                targetPath: '$(Pipeline.Workspace)\sqlscripts'
             - task: AzurePowerShell@5
               displayName: "Deploy database package"
               inputs:
@@ -172,7 +172,7 @@ stages:
                       -ServerName $(azSQLServerName) `
                       -FirewallRuleName "TemporaryRule_AzureDevOps" -StartIpAddress $ip -EndIpAddress $ip
 
-                  Install-DBOPackage -Path $(Pipeline.Workspace)\sql\$(artifactName).zip -Credential $(New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $(adminSqlLogin), $(ConvertTo-SecureString -String $(adminSqlpassword) -AsPlainText -Force))
+                  Install-DBOPackage -Path $(Pipeline.Workspace)\sqlscripts\$(artifactName).zip -Credential $(New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $(adminSqlLogin), $(ConvertTo-SecureString -String $(adminSqlpassword) -AsPlainText -Force))
 
                   # Always remove firewall rule
                   Remove-AzSqlServerFirewallRule -ServerName $(azSQLServerName) -FirewallRuleName 'TemporaryRule_AzureDevOps' -ResourceGroupName $(rgName) -Force

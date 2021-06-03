@@ -4,3 +4,4 @@ Folder containing Database-Deployment-Automation folder setup structure for the 
 
 * sqlscripts: Contains all .sql files that can be executed through dbops module
 * psscripts: Contains script for creating Azure SQL database
+* tests: all Pester tests

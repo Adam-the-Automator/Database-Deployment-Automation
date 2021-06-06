@@ -31,16 +31,13 @@ stages:
   - stage: "CreateDB"
     displayName: "Create database"
     jobs:
-
       ##########################################################################
       #       Job: Create Azure SQL                                            #
       ##########################################################################
-
       - job: "Database"
         displayName: "Create database"
         pool: 
           vmImage: 'windows-latest'
-
         steps:
           - task: AzurePowerShell@5
             name: "Database"
@@ -49,35 +46,18 @@ stages:
               azureSubscription: "ServiceConnection"
               ScriptType: "InlineScript"
               Inline: |
-                $rg = Get-AzResourceGroup -Name $(rgName) -ErrorAction SilentlyContinue
-                if (-not $rg) {
-                    New-AzResourceGroup -Name $(rgName) -Location "$(rgLocation)"
-                }
-                                                
-                $azSQLServerName = "$(azSQLServerName)"
-                $azSqlServer = Get-AzSqlServer -ServerName $azSQLServerName 
-                if (-not $azSqlServer) {
-                    $azSqlServer = New-AzSqlServer -ResourceGroupName $(rgName) `
-                    -ServerName $azSQLServerName `
-                    -Location "$(rgLocation)" `
-                    -SqlAdministratorCredentials $(New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $(adminSqlLogin), $(ConvertTo-SecureString -String $(adminSqlpassword) -AsPlainText -Force))
-                }
-                
-                $azSqlFirwallRule = Get-AzSqlServerFirewallRule -FirewallRuleName 'FirewallRule_AccessRule' -ServerName $azSqlServerName -ResourceGroupName $(rgName) -ErrorAction SilentlyContinue
-                if (-not $azSqlFirwallRule) {
-                    # Create a server firewall rule that allows access from the specified IP range
-                    $serverFirewallRule = New-AzSqlServerFirewallRule -ResourceGroupName $(rgName) `
-                    -ServerName $azSQLServerName `
-                    -FirewallRuleName "FirewallRule_AccessRule" -StartIpAddress $(ip) -EndIpAddress $(ip)
-                }
-                                
-                $azSqlDatabase = Get-AzSqlDatabase -DatabaseName $(azSqlDatabaseName) -ServerName $azSQLServerName -ResourceGroupName $(rgName) -ErrorAction  SilentlyContinue
-                if (-not $azSqlDatabase) {
-                    $database = New-AzSqlDatabase  -ResourceGroupName $(rgName) `
-                    -ServerName $azSQLServerName `
-                    -DatabaseName $(azSqlDatabaseName) `
-                    -Edition "Basic"    
-                }
+                  # Dot source the script to load the function
+                  . ./psscripts/New-AzureSqlDatabase.ps1
+                  # Specify the parameters for the script
+                  $params = @{
+                  resourceGroupName = '$(rgName)'
+                  sqlServerName = '$(azSQLServerName)'
+                  sqlDatabaseName = '$(azSqlDatabaseName)'
+                  publicIP = '$(ip)'
+                  sqlAdministrator = '$(adminSqlLogin)'
+                  sqlPassword = '$(adminSqlPassword)'
+                  }
+                  New-AzureSqlDatabase @params
               azurePowerShellVersion: "LatestVersion"
 ##########################################################################
 #                                                                        #
@@ -186,46 +166,51 @@ stages:
   - stage: "Test"
     displayName: "Run test(s)"
     dependsOn: "Release"
-
     jobs:
-
       ##########################################################################
       #       Job: Test  package                                               #
       ##########################################################################
-
       - job:
         displayName: "Run test(s)"
         pool: 
           vmImage: 'windows-latest'    
-
         steps:
-          - task: PowerShell@2
+          - task: AzurePowerShell@5
             inputs:
-              targetType: "inline"
-              script: |
+              azureSubscription: 'ServiceConnection'
+              ScriptType: 'InlineScript'
+              Inline: |
                 # Install required module
-                Install-Module -Name dbatools -Scope CurrentUser -Repository PSGallery
-                
+                Install-Module -Name dbatools -Scope CurrentUser -Force
                 # Initiate variables
                 $instance = "$(azSqlServerName)" + ".database.windows.net"
                 $database = "$(azSqlDatabaseName)"
                 $userName = "$(adminSqlLogin)"
                 $password = "$(adminSqlPassword)"
-
+                # Get current hosted agent ip
+                $ip = Invoke-RestMethod http://ipinfo.io/json | Select-Object -ExpandProperty ip
+                # Temporary add ip
+                $azSqlFirwallRule = Get-AzSqlServerFirewallRule -FirewallRuleName 'TemporaryRule_AzureDevOps' -ServerName $(azSQLServerName) -ResourceGroupName $(rgName) -ErrorAction SilentlyContinue
+                if ($azSqlFirwallRule) {
+                  Remove-AzSqlServerFirewallRule -ServerName $(azSQLServerName) -FirewallRuleName 'TemporaryRule_AzureDevOps' -ResourceGroupName $(rgName)
+                }
+                New-AzSqlServerFirewallRule -ResourceGroupName $(rgName) `
+                    -ServerName $(azSQLServerName) `
+                    -FirewallRuleName "TemporaryRule_AzureDevOps" -StartIpAddress $ip -EndIpAddress $ip
                 # Specify the data for container
                 $Data = @{
-                    instance = $instance
-                    database = $database
-                    userName = $userName
-                    password = $password
-                    procedureName = 'AddInventoryRecords'
+                  sqlServerName = $instance
+                  sqlDatabaseName = $database
+                  sqlAdministrator = $userName
+                  sqlPassword = $password
                 }
-                
                 # Create container
                 $container = New-PesterContainer -Path .\tests\ -Data $data
-
                 # Invoke with CI
                 Invoke-Pester -Container $Container -CI
+                # Remove the temporary firewall rule
+                Remove-AzSqlServerFirewallRule -ServerName $(azSQLServerName) -FirewallRuleName 'TemporaryRule_AzureDevOps' -ResourceGroupName $(rgName)
+              azurePowerShellVersion: 'LatestVersion'
           - task: PublishTestResults@2
             inputs:
               testResultsFormat: 'NUnit'
